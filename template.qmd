@@ -1,6 +1,6 @@
 ---
 title: "Lab 4: House Elevation NPV Analysis"
-author: "Your Name"
+author: "Grant Parajuli"
 jupyter: julia-1.10
 date: 2024-02-08
 week: 5
@@ -11,18 +11,18 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
 
 # these are optional
 # if you have cache=true, you'll need the jupyter-cache package installed
@@ -50,3 +50,90 @@ Plots.default(; margin=6Plots.mm)
 include("depthdamage.jl")
 ```
 
+# Setup
+```{julia}
+function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+    offset = 9.3 # 9.3ft height for Willie G's
+    # calculate the expected damages
+    house_dist = GeneralizedExtremeValue(flood_dist.μ - offset, flood_dist.σ, flood_dist.ξ)
+    samples = rand(house_dist, 100_000) .* 1u"ft"
+    damages = damage_fn.(samples)
+    expected_damages_pct = mean(damages)
+    c_dmg = house_value * expected_damages_pct / 100
+
+    # calculate the cost of elevating
+    c_constr = elevation_cost(Δh, house_area)
+
+    # return the total cost and benefit
+    return -c_constr - c_dmg
+end
+```
+
+```{julia}
+function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+    npv = 0
+    # calculate the costs and benefits for each year, and then discount
+    for year in 0:(T-1)
+        # no elevation after 1st year
+        if year != 0
+            Δh = 0u"ft"
+        end
+        # compute damages
+        annual_damage = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+        # discount damages and add to npv
+        npv += annual_damage * (1-discount_rate) ^ year
+    end
+    return npv
+end
+```
+
+```{julia}
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+desc = "Cafeteria Restaurant, contents (Inventory)"
+row = @rsubset(haz_fl_dept, :Description == desc)[1, :] # select the row I want
+dd = DepthDamageData(row) # extract the depth-damage data
+damage_fn = get_depth_damage_function(dd.depths, dd.damages) # get the depth-damage function
+house_area = 1000u"ft^2"
+elevation_cost = get_elevation_cost_function() # gives us a fitted interpolator
+gauge_dist = GeneralizedExtremeValue(5, 1, 0.1) # hypothetical gauge distribution
+
+# since I'm doing a restaurant, search results included the value of both the land and the inventory in addition to structure. Nearby land seemed to go for 400-500k for a large area. As such, I'll assume this small area has probably about 80% of its value in the structure. A restaurant on this island (Leo's Cajun Corner at 3201 Broadway) was appraised for 1.4million in total, so I'll assume Willie G's is similar. To be fair, it's likely a larger building and it's located in a different area of the island, but data for commercial buildings was less easily available.
+
+house_structure_value = 1400000 * .8
+```
+
+# Single SOW, 2 actions
+
+I'll first assume we elevate by 5 ft over a 10 year design window and a 5% discount rate. I'll also consider 0ft of elevation and a 7ft elevation.
+```{julia}
+cost5ft = npv_cost_benefit(gauge_dist, damage_fn, elevation_cost, house_area, house_structure_value, 5u"ft", 10, .05)
+
+cost0ft = npv_cost_benefit(gauge_dist, damage_fn, elevation_cost, house_area, house_structure_value, 0u"ft", 10, .05)
+
+cost7ft = npv_cost_benefit(gauge_dist, damage_fn, elevation_cost, house_area, house_structure_value, 7u"ft", 10, .05)
+
+println(cost0ft)
+println(cost5ft)
+println(cost7ft)
+```
+
+The NPV of elevating the house is really high compared to leaving it as is. This means the avoided cost of damages by elevating is probably a lot less than the capex associated with elevating the house at all. This is kind of surprising to me since this is a very valuable property.
+
+# Sensitivity test
+
+```{julia}
+discount = Normal(4,2) /100
+# only 1000 samples since this is more computationally expensive
+rate_samples = rand(discount, 1000)
+npvs = npv_cost_benefit.(gauge_dist, damage_fn, elevation_cost, house_area, house_structure_value, 5u"ft", 10, rate_samples)
+exp_npv = mean(npvs)
+```
+
+All of the NPVs were high relative to the base expected damages to the house. I'm a little suspicious of this, but I'm assuming it's because there's already a lot of elevation at this location, so elevating more has a comparatively low benefit.
+
+The sensitivity test showed that there could be a $100,000 difference in the data from the discount rate alone. That's pretty significant and shows the importance of accounting for different discount rate scenarios.
+
+Some limitations of this analysis:
+We only look at money here due to structural damage. As this is a restaurant, inventory damage is also important. In addition, the days the restaurant is inoperable may result in an additional cost in net cashflow. This would likely result in amplified costs from damages, which might improve the potential for elevations. Additionally, I'd want to vary the design window. It might take a lot more than 10 years for the savings in damage to displace the cost of elevating. I also kindof want to examine a more realistic situation where a house doesn't have much elevation, where elevating the house might be a lot more useful.
+
+In this analysis, we also make several assumptions, namely about building value, building area, and the depth damage function as well as the gauge distribution. There are a lot of sources of parameter uncertainty and model uncertainty here and it's difficult to propagate all of those into the net present value. Exploratory modeling is important here to get some ideas of how our system is changin physically.
